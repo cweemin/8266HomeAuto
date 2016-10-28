@@ -19,7 +19,7 @@
 
 #=== Project specific definitions: sketch and list of needed libraries
 
-SKETCH ?= $(HOME)/smb/Arduino/8266HomeAuto/8266HomeAuto.ino
+SKETCH ?= $(HOME)/Arduino/HomeAuto/HomeAuto.ino
 LIBS ?= $(ESP_LIBS)/Wire \
         $(ESP_LIBS)/ESP8266WiFi \
         $(ESP_LIBS)/ESP8266mDNS \
