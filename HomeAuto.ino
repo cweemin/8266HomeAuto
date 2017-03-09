@@ -1,7 +1,7 @@
-/* vim: set filetype=cpp ts=2 et sw=2 ai : */
+/* vim: set filetype=cpp ts=2 et cin sw=2 ai : */
 #define HTTP_SERVER
 #define OTA
-#define SYSLOG
+//#define SYSLOG
 #define THINGSPEAK
 #include <time.h>
 #include <ESP8266WiFi.h>
@@ -18,12 +18,15 @@
 #ifdef SYSLOG
 #include <WiFiUdp.h>
 #endif
+#ifdef LCD
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#endif
 #include <RCSwitch.h>
 #include <Ticker.h>
 #include <IPAddress.h>
-#include <config.h>
+#include "config.h"
+#include "switch.h"
 //#include <Timezone.h>
 #define RCTRANSMITTER_GPIO  13
 #define RCRECEIVER_GPIO     14
@@ -77,9 +80,28 @@ volatile struct bitField {
   bool     TSlastConnected:1;
   bool     TSRecord:       1;
 } Data;
-LiquidCrystal_I2C lcd(0x27, 16, 2); // set the LCD address to 0x27 for a 16 chars and 2 line display
-RCSwitch mySwitch = RCSwitch();
 
+#ifdef LCD
+LiquidCrystal_I2C lcd(0x27, 16, 2); // set the LCD address to 0x27 for a 16 chars and 2 line display
+#endif
+
+
+/*** Define Switch ***/
+RCSwitch *mySwitch = new RCSwitch();
+switch_prop *GEFanProp = new switch_prop(mySwitch, 6, 400, 25);
+pSwitch LivingRoomFanLow = pSwitch(GEFanProp, 10463095, 10463101);
+pSwitch LivingRoomFanMed = pSwitch(GEFanProp, 10463087, 10463101);
+pSwitch LivingRoomFanHi  = pSwitch(GEFanProp, 10463071, 10463101);
+pSwitch LivingRoomLight  = pSwitch(GEFanProp, 10463102, 10463102);
+
+
+switch_prop *WallSwitch = new switch_prop(mySwitch, 1, 350, 24);
+pSwitch KitchenLight = pSwitch(WallSwitch, 0x73935C, 0x73935C);
+
+switch_prop *PlugSwitch = new switch_prop(mySwitch, 1, 600, 16);
+pSwitch LivingRoomLamp = pSwitch(PlugSwitch, 0x6908, 0x6A08);
+pSwitch KitchenCounter = pSwitch(PlugSwitch, 0x6888, 0x6848);
+/******************************************************************************/
 Ticker LCDBacklight;
 
 #ifdef SYSLOG
@@ -111,7 +133,6 @@ void resumeSensor();
 ICACHE_RAM_ATTR void handleInterrupt(void);
 ICACHE_RAM_ATTR void userInterrupt(void);
 bool crc(uint8_t row[], int cols);
-void KitchenLightToggle();
 void printWeather(bool sysLog, uint8_t *p_val = NULL);
 void printPool(bool sysLog, uint8_t *p_val = NULL);
 void transition(RX_STATE);
@@ -190,6 +211,7 @@ class qArray
     int size, items,head, tail;
 
 };
+
 qArray delta_queue;
 class debugger 
 {
@@ -227,53 +249,22 @@ class debugger
 
 debugger DBG;
 
+bool handleAuth(bool reqAuth=false) {
+  if(!server.authenticate(www_username, www_password)) {
+    if(reqAuth)
+      server.requestAuthentication();
+    else
+      server.send(401);
+    return false;
+  } else 
+    return true;
+}
+#ifdef LCD
 void nobacklight() {
   lcd.noBacklight();
 }
+#endif
 
-void KitchenLightToggle() {
-  pauseSensor();
-  mySwitch.setPulseLength(350);
-  mySwitch.send(0x73935C, 24);
-  lcd.setCursor(0, Data.DisplayLine);
-  Data.DisplayLine = !Data.DisplayLine;
-  lcd.print("Kitchen Light   ");
-  resumeSensor();
-}
-
-void LivingRoomLightSwitch(bool onOff) {
-  pauseSensor();
-  mySwitch.setPulseLength(600);
-  lcd.setCursor(0,0); 
-  lcd.print("LivingRoom Light");
-  lcd.setCursor(0,1);
-  if(onOff) {
-    lcd.print("     On         ");
-    mySwitch.send(0x6908,16);
-
-  } else {
-    lcd.print("     Off        ");
-    mySwitch.send(0x6A08,16);
-  }
-  Data.DisplayLine = !Data.DisplayLine;
-  resumeSensor();
-}
-
-void LivingRoomFanSwitch(bool onOff) {
-  pauseSensor();
-  mySwitch.setPulseLength(600);
-  lcd.setCursor(0,0); 
-  lcd.print("LivingRoom Fan  ");
-  lcd.setCursor(0,1);
-  if(onOff) {
-    lcd.print("     On         ");
-    mySwitch.send(0x6888,16);
-  } else {
-    lcd.print("     Off        ");
-    mySwitch.send(0x6848,16);
-  }
-  resumeSensor();
-}
 //format bytes
 String formatBytes(size_t bytes){
   if (bytes < 1024){
@@ -305,8 +296,83 @@ String getContentType(String filename){
   return "text/plain";
 }
 
+void handleWeather() {
+  if(Data.tempAvail) {
+    String json = "{";
+    json += "\"RawTemp\":" + String(rawTemp[0]);
+    json += ", \"Humidity\":" + String(humidity);
+    json += ", \"Time\":" + String(temp_timestamp[0]);
+    json += "}";
+    server.send(200, "text/json", json);
+    json = String();
+  } else {
+    server.send(500, "text/plain",  "DATA NOT AVAILABLE");
+  }
+}
+
+void handlePool() {
+  if(Data.pooltempAvail) {
+    String json = "{";
+    json += "\"RawTemp\":" + String(rawTemp[1]);
+    json += ", \"Time\":" + String(temp_timestamp[1]);
+    json += "}";
+    server.send(200, "text/json", json);
+    json = String();
+  } else {
+    server.send(500, "text/plain",  "DATA NOT AVAILABLE");
+  }
+}
+
+void handleSwitch() {
+  bool failed = false;
+  bool status;
+  uint16_t start_bit = 1;
+  uint16_t t_type,t_status;
+  uint8_t i;
+  if(server.hasArg("type") && server.hasArg("status")) {
+    t_type = (uint16_t) server.arg("type").toInt();
+    t_status = (uint16_t) server.arg("status").toInt();
+    for(i=0; i< 8; i++) {
+      status = (bool) ((t_status & start_bit) >> i);
+      switch (t_type & start_bit) {
+        case 0b1: //1
+          KitchenLight.On();
+          break;
+        case 0b10: //2
+          LivingRoomLamp.Toggle(status);
+          break;
+        case 0b100: //4
+          KitchenCounter.Toggle(status);
+          break;
+        case 0b1000: //8
+          LivingRoomFanLow.Toggle(status);
+          break;
+        case 0b10000: //16
+          LivingRoomFanMed.Toggle(status);
+          break;
+        case 0b100000: //32
+          LivingRoomFanHi.Toggle(status);
+          break;
+        case 0b1000000: //64
+          LivingRoomFanHi.Off();
+          break;
+        case 0b10000000: //128
+          LivingRoomLight.On();
+          break;
+      } // end of switch
+      start_bit <<= 1;
+    } // end of for
+    server.send(200,"text/plain", "");
+  } else {
+    server.send(500,"text/plain", "bad args");
+  }
+}
+
 bool handleFileRead(String path){
   DBG_OUTPUT_PORT.println("handleFileRead: " + path);
+  if (!handleAuth(true)) {
+    return false;
+  }
   if(path.endsWith("/")) path += "index.htm";
   String contentType = getContentType(path);
   String pathWithGz = path + ".gz";
@@ -322,6 +388,7 @@ bool handleFileRead(String path){
 }
 
 void handleFileUpload(){
+  if(!handleAuth()) return;
   if(server.uri() != "/edit") return;
   HTTPUpload& upload = server.upload();
   if(upload.status == UPLOAD_FILE_START){
@@ -341,6 +408,7 @@ void handleFileUpload(){
 }
 
 void handleFileDelete(){
+  if(!handleAuth()) return;
   if(server.args() == 0) return server.send(500, "text/plain", "BAD ARGS");
   String path = server.arg(0);
   DBG_OUTPUT_PORT.println("handleFileDelete: " + path);
@@ -400,9 +468,10 @@ void handleFileList() {
 void setup() {
   // put your setup code here, to run once:
   DBG_OUTPUT_PORT.begin(115200);
-
+#ifdef LCD
   lcd.begin();
   lcd.backlight();
+#endif
   pinMode(BUTTONSWITCH_GPIO, INPUT_PULLUP);
 
 #ifdef HTTP_SERVER
@@ -419,20 +488,27 @@ void setup() {
 #endif
 
   // Setup Wifi
+  WiFi.hostname(host);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WiFiSSID, WiFiPSK);
   i = 120; //One minute timeout for DHCP
   DBG_OUTPUT_PORT.println("Connecting");
+#ifdef LCD
   lcd.setCursor(0,0);
   lcd.print("Connecting");
+#endif
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
     DBG_OUTPUT_PORT.print(".");
+#ifdef LCD
     lcd.print(".");
+#endif
     if (--i == 0) {
       DBG_OUTPUT_PORT.println("Connection Fail");
+#ifdef LCD
       lcd.print("Connection Fail");
+#endif
       ESP.restart();
       break;
     }
@@ -498,6 +574,7 @@ void setup() {
   server.on("/list", HTTP_GET, handleFileList);
   //load editor
   server.on("/edit", HTTP_GET, [](){
+      
       if(!handleFileRead("/edit.htm")) server.send(404, "text/plain", "FileNotFound");
       });
   //create file
@@ -508,74 +585,17 @@ void setup() {
   //second callback handles file uploads at that location
   server.on("/edit", HTTP_POST, [](){ server.send(200, "text/plain", ""); }, handleFileUpload);
 
-  //called when the url is not defined here
+  //called when the url is not defined here`
   //use it to load content from SPIFFS
   server.onNotFound([](){
       if(!handleFileRead(server.uri()))
       server.send(404, "text/plain", "FileNotFound");
       });
 
-  //get heap status, analog input value and all GPIO statuses in one json call
-  server.on("/all", HTTP_GET, [](){
-      String json = "{";
-      json += "\"heap\":"+String(ESP.getFreeHeap());
-      json += ", \"analog\":"+String(analogRead(A0));
-      json += ", \"gpio\":"+String((uint32_t)(((GPI | GPO) & 0xFFFF) | ((GP16I & 0x01) << 16)));
-      json += "}";
-      server.send(200, "text/json", json);
-      json = String();
-      });
-  server.on("/pool", HTTP_GET, []() {
-      if(Data.pooltempAvail) {
-      String json = "{";
-      json += "\"RawTemp\":" + String(rawTemp[1]);
-      json += ", \"Time\":" + String(temp_timestamp[1]);
-      json += "}";
-      server.send(200, "text/json", json);
-      json = String();
-      } else {
-      server.send(500, "text/plain",  "DATA NOT AVAILABLE");
-      }
-      });
-  server.on("/weather", HTTP_GET, []() {
-      if(Data.tempAvail) {
-      String json = "{";
-      json += "\"RawTemp\":" + String(rawTemp[0]);
-      json += ", \"Humidity\":" + String(humidity);
-      json += ", \"Time\":" + String(temp_timestamp[0]);
-      json += "}";
-      server.send(200, "text/json", json);
-      json = String();
-      } else {
-      server.send(500, "text/plain",  "DATA NOT AVAILABLE");
-      }
-      });
-  server.on("/switch", HTTP_GET, []() {
-      bool failed = false;
-      if(server.hasArg("type") && server.hasArg("status")) {
-      switch (server.arg("type").toInt()) {
-      case 0:
-      KitchenLightToggle();
-      break;
-      case 1:
-      LivingRoomLightSwitch(server.arg("status").toInt());
-      break;
-      case 2:
-      LivingRoomFanSwitch(server.arg("status").toInt());
-      break;
-      default:
-      failed = true;
-      break;
-      }
-      } else {
-      failed = true;
-      }
-      if(failed) {
-        server.send(500,"text/plain", "BAD ARGS");
-      } else {
-        server.send(200,"text/plain", "");
-      }
-  });
+  server.on("/pool", HTTP_GET, handlePool);
+  server.on("/weather", HTTP_GET, handleWeather);
+  server.on("/switch", HTTP_GET, handleSwitch);
+
   server.begin();
   DBG_OUTPUT_PORT.println("HTTP server started");
 
@@ -584,7 +604,7 @@ void setup() {
   //delta_queue.setPrinter(DBG_OUTPUT_PORT);
   DBG_OUTPUT_PORT.println("Attaching 433 Sensor to GPIO Interrupt");
   lastConnectionTime = click_timer = Temp_Timer[0] = Temp_Timer[1] = lastTime = micros(); //establish baseline time
-  mySwitch.enableTransmit(RCTRANSMITTER_GPIO);
+  mySwitch->enableTransmit(RCTRANSMITTER_GPIO);
   Data.poolTS = false;
   Data.weatherTS = false;
   Data.tempAvail = false;
@@ -597,7 +617,9 @@ void setup() {
   Data.collectingMode = false;
   Data.TSlastConnected = false;
   Data.TSRecord = true;
+#ifdef LCD
   LCDBacklight.attach(5, nobacklight); 
+#endif
   transition(sync_high);
   // client.connect(thingSpeakAddress, 80); //Establish a connection to thingspeak
   attachInterrupt(RCRECEIVER_GPIO, handleInterrupt, CHANGE);
@@ -740,12 +762,14 @@ void checkRCTransmitter() {
                 if (seconds_sincelast[0] != 0 ) {
                   printWeather(true, value);
                 }
+#ifdef LCD
                 lcd.setCursor(0, Data.DisplayLine);
                 Data.DisplayLine = !Data.DisplayLine;
                 lcd.print((float) (value[2] * 9.0 /50.0) + 32.0);
                 lcd.print("F ");
                 lcd.print(value[3]);
                 lcd.print("%");
+#endif
                 //rx_state = sync_high;
                 transition(sync_high);
                 Temp_Timer[0] = temp_t;
@@ -776,6 +800,7 @@ void checkRCTransmitter() {
     yield();
   } //End of While
 }
+#ifdef LCD
 void checkButtonTransmitter() {
   if (Data.userClick) {
     DBG_OUTPUT_PORT.println("User Click!");
@@ -787,13 +812,14 @@ void checkButtonTransmitter() {
       lcd.setCursor(0,Data.DisplayLine);
       Data.DisplayLine = !Data.DisplayLine;
       lcd.print("User Click");
-      KitchenLightToggle();
+      KitchenLight.On();
     } else {
       click_timer =  millis();
     }
     Data.userClick = false;
   }
 }
+#endif
 void serialEvent1() {
   while (Serial.available()) {
     // get the new byte:
@@ -869,7 +895,9 @@ void loop() {
   server.handleClient();
 #endif
   checkRCTransmitter();
+#ifdef LCD  
   checkButtonTransmitter();
+#endif
 #ifdef OTA
   ArduinoOTA.handle();
 #endif
