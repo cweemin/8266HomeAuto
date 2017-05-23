@@ -7,9 +7,12 @@
 #include <ESP8266WiFi.h>
 #include <stdio.h>
 #ifdef HTTP_SERVER
-#include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
 #include <FS.h>
+#include <ESP8266mDNS.h>
+#include <ESP8266LLMNR.h>
+#include "ESPAsyncTCP.h"
+#include "ESPAsyncWebServer.h"
+#include <SPIFFSEditor.h>
 #endif
 #ifdef OTA
 #include <ArduinoOTA.h>
@@ -49,13 +52,13 @@ uint32_t Temp_Timer[2];
 uint32_t click_timer;
 static time_t temp_timestamp[2];
 static time_t now_t;
-//TimeChangeRule usCDT = {"CDT", Second, Sun, Mar, 2, -300};  //UTC - 5 hours
-//TimeChangeRule usCST = {"CST", First, Sun, Nov, 2, -360};   //UTC - 6 hours
-//Timezone tz(usCDT,usCST);
 
 uint16_t seconds_sincelast[2], lastConnectionTime;
 static uint8_t i,j, value[5];
-String inputString = "", myIPAddress;
+#ifdef SYSLOG
+String myIPAddress;
+#endif
+String inputString = "";
 uint8 TSFailAttemp = 0;
 enum RX_STATE {
   sync_high,
@@ -120,9 +123,74 @@ void updateThingSpeak(String tsData, String Key);
 
 
 #ifdef HTTP_SERVER
-ESP8266WebServer server(80);
-//holds the current upload
-File fsUploadFile;
+AsyncWebServer WebServer(80);
+AsyncWebSocket ws("/ws"); // access at ws://[esp ip]/ws
+void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventType type, void * arg, uint8_t *data, size_t len){
+  if(type == WS_EVT_CONNECT){
+    Serial.printf("ws[%s][%u] connect\n", server->url(), client->id());
+//    client->printf("Hello Client %u :)", client->id());
+    client->ping();
+  } else if(type == WS_EVT_DISCONNECT){
+    Serial.printf("ws[%s][%u] disconnect: %u\n", server->url(), client->id());
+  } else if(type == WS_EVT_ERROR){
+    Serial.printf("ws[%s][%u] error(%u): %s\n", server->url(), client->id(), *((uint16_t*)arg), (char*)data);
+  } else if(type == WS_EVT_PONG){
+    Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len)?(char*)data:"");
+  } else if(type == WS_EVT_DATA){
+    AwsFrameInfo * info = (AwsFrameInfo*)arg;
+    String msg = "{\"type\":\"command\",\"command\":\"";
+    if(info->final && info->index == 0 && info->len == len){
+      //the whole message is in a single frame and we got all of it's data
+      Serial.printf("ws[%s][%u] %s-message[%llu]: ", server->url(), client->id(), (info->opcode == WS_TEXT)?"text":"binary", info->len);
+
+      if(info->opcode == WS_TEXT){
+        for(size_t i=0; i < info->len; i++) {
+          msg += (char) data[i];
+        }
+	msg += "\"}";
+
+	ws.text(client->id(), msg);
+
+      } else {
+        char buff[3];
+        for(size_t i=0; i < info->len; i++) {
+          sprintf(buff, "%02x ", (uint8_t) data[i]);
+          msg += buff ;
+        }
+      }
+      Serial.printf("%s\n",msg.c_str());
+    } else {
+      //message is comprised of multiple frames or the frame is split into multiple packets
+      if(info->index == 0){
+        if(info->num == 0)
+          Serial.printf("ws[%s][%u] %s-message start\n", server->url(), client->id(), (info->message_opcode == WS_TEXT)?"text":"binary");
+        Serial.printf("ws[%s][%u] frame[%u] start[%llu]\n", server->url(), client->id(), info->num, info->len);
+      }
+
+      Serial.printf("ws[%s][%u] frame[%u] %s[%llu - %llu]: ", server->url(), client->id(), info->num, (info->message_opcode == WS_TEXT)?"text":"binary", info->index, info->index + len);
+
+      if(info->opcode == WS_TEXT){
+        for(size_t i=0; i < info->len; i++) {
+          msg += (char) data[i];
+        }
+      } else {
+        char buff[3];
+        for(size_t i=0; i < info->len; i++) {
+          sprintf(buff, "%02x ", (uint8_t) data[i]);
+          msg += buff ;
+        }
+      }
+      Serial.printf("%s\n",msg.c_str());
+
+      if((info->index + len) == info->len){
+        Serial.printf("ws[%s][%u] frame[%u] end[%llu]\n", server->url(), client->id(), info->num, info->len);
+        if(info->final){
+          Serial.printf("ws[%s][%u] %s-message end\n", server->url(), client->id(), (info->message_opcode == WS_TEXT)?"text":"binary");
+        }
+      }
+    }
+  }
+}
 #endif
 
 //************************************Function Prototype************************/
@@ -249,16 +317,6 @@ class debugger
 
 debugger DBG;
 
-bool handleAuth(bool reqAuth=false) {
-  if(!server.authenticate(www_username, www_password)) {
-    if(reqAuth)
-      server.requestAuthentication();
-    else
-      server.send(401);
-    return false;
-  } else 
-    return true;
-}
 #ifdef LCD
 void nobacklight() {
   lcd.noBacklight();
@@ -279,59 +337,42 @@ String formatBytes(size_t bytes){
 }
 
 #ifdef HTTP_SERVER
-String getContentType(String filename){
-  if(server.hasArg("download")) return "application/octet-stream";
-  else if(filename.endsWith(".htm")) return "text/html";
-  else if(filename.endsWith(".html")) return "text/html";
-  else if(filename.endsWith(".css")) return "text/css";
-  else if(filename.endsWith(".js")) return "application/javascript";
-  else if(filename.endsWith(".png")) return "image/png";
-  else if(filename.endsWith(".gif")) return "image/gif";
-  else if(filename.endsWith(".jpg")) return "image/jpeg";
-  else if(filename.endsWith(".ico")) return "image/x-icon";
-  else if(filename.endsWith(".xml")) return "text/xml";
-  else if(filename.endsWith(".pdf")) return "application/x-pdf";
-  else if(filename.endsWith(".zip")) return "application/x-zip";
-  else if(filename.endsWith(".gz")) return "application/x-gzip";
-  return "text/plain";
-}
-
-void handleWeather() {
+void handleWeather(AsyncWebServerRequest *request) {
   if(Data.tempAvail) {
     String json = "{";
     json += "\"RawTemp\":" + String(rawTemp[0]);
     json += ", \"Humidity\":" + String(humidity);
     json += ", \"Time\":" + String(temp_timestamp[0]);
     json += "}";
-    server.send(200, "text/json", json);
+    request->send(200, "text/json", json);
     json = String();
   } else {
-    server.send(500, "text/plain",  "DATA NOT AVAILABLE");
+    request->send(500, "text/plain",  "DATA NOT AVAILABLE");
   }
 }
 
-void handlePool() {
+void handlePool(AsyncWebServerRequest *request) {
   if(Data.pooltempAvail) {
     String json = "{";
     json += "\"RawTemp\":" + String(rawTemp[1]);
     json += ", \"Time\":" + String(temp_timestamp[1]);
     json += "}";
-    server.send(200, "text/json", json);
+    request->send(200, "text/json", json);
     json = String();
   } else {
-    server.send(500, "text/plain",  "DATA NOT AVAILABLE");
+    request->send(500, "text/plain",  "DATA NOT AVAILABLE");
   }
 }
 
-void handleSwitch() {
+void handleSwitch(AsyncWebServerRequest *request) {
   bool failed = false;
   bool status;
   uint16_t start_bit = 1;
   uint16_t t_type,t_status;
   uint8_t i;
-  if(server.hasArg("type") && server.hasArg("status")) {
-    t_type = (uint16_t) server.arg("type").toInt();
-    t_status = (uint16_t) server.arg("status").toInt();
+  if(request->hasArg("type") && request->hasArg("status")) {
+    t_type = (uint16_t) request->arg("type").toInt();
+    t_status = (uint16_t) request->arg("status").toInt();
     for(i=0; i< 8; i++) {
       status = (bool) ((t_status & start_bit) >> i);
       switch (t_type & start_bit) {
@@ -362,112 +403,17 @@ void handleSwitch() {
       } // end of switch
       start_bit <<= 1;
     } // end of for
-    server.send(200,"text/plain", "");
+    request->send(200,"text/plain", "");
   } else {
-    server.send(500,"text/plain", "bad args");
+    request->send(500,"text/plain", "bad args");
   }
-}
-
-bool handleFileRead(String path){
-  DBG_OUTPUT_PORT.println("handleFileRead: " + path);
-  if (!handleAuth(true)) {
-    return false;
-  }
-  if(path.endsWith("/")) path += "index.htm";
-  String contentType = getContentType(path);
-  String pathWithGz = path + ".gz";
-  if(SPIFFS.exists(pathWithGz) || SPIFFS.exists(path)){
-    if(SPIFFS.exists(pathWithGz))
-      path += ".gz";
-    File file = SPIFFS.open(path, "r");
-    size_t sent = server.streamFile(file, contentType);
-    file.close();
-    return true;
-  }
-  return false;
-}
-
-void handleFileUpload(){
-  if(!handleAuth()) return;
-  if(server.uri() != "/edit") return;
-  HTTPUpload& upload = server.upload();
-  if(upload.status == UPLOAD_FILE_START){
-    String filename = upload.filename;
-    if(!filename.startsWith("/")) filename = "/"+filename;
-    DBG_OUTPUT_PORT.print("handleFileUpload Name: "); DBG_OUTPUT_PORT.println(filename);
-    fsUploadFile = SPIFFS.open(filename, "w");
-    filename = String();
-  } else if(upload.status == UPLOAD_FILE_WRITE){
-    if(fsUploadFile)
-      fsUploadFile.write(upload.buf, upload.currentSize);
-  } else if(upload.status == UPLOAD_FILE_END){
-    if(fsUploadFile)
-      fsUploadFile.close();
-    DBG_OUTPUT_PORT.print("handleFileUpload Size: "); DBG_OUTPUT_PORT.println(upload.totalSize);
-  }
-}
-
-void handleFileDelete(){
-  if(!handleAuth()) return;
-  if(server.args() == 0) return server.send(500, "text/plain", "BAD ARGS");
-  String path = server.arg(0);
-  DBG_OUTPUT_PORT.println("handleFileDelete: " + path);
-  if(path == "/")
-    return server.send(500, "text/plain", "BAD PATH");
-  if(!SPIFFS.exists(path))
-    return server.send(404, "text/plain", "FileNotFound");
-  SPIFFS.remove(path);
-  server.send(200, "text/plain", "");
-  path = String();
-}
-
-void handleFileCreate(){
-  if(server.args() == 0)
-    return server.send(500, "text/plain", "BAD ARGS");
-  String path = server.arg(0);
-  DBG_OUTPUT_PORT.println("handleFileCreate: " + path);
-  if(path == "/")
-    return server.send(500, "text/plain", "BAD PATH");
-  if(SPIFFS.exists(path))
-    return server.send(500, "text/plain", "FILE EXISTS");
-  File file = SPIFFS.open(path, "w");
-  if(file)
-    file.close();
-  else
-    return server.send(500, "text/plain", "CREATE FAILED");
-  server.send(200, "text/plain", "");
-  path = String();
-}
-
-void handleFileList() {
-  if(!server.hasArg("dir")) {server.send(500, "text/plain", "BAD ARGS"); return;}
-
-  String path = server.arg("dir");
-  DBG_OUTPUT_PORT.println("handleFileList: " + path);
-  Dir dir = SPIFFS.openDir(path);
-  path = String();
-
-  String output = "[";
-  while(dir.next()){
-    File entry = dir.openFile("r");
-    if (output != "[") output += ',';
-    bool isDir = false;
-    output += "{\"type\":\"";
-    output += (isDir)?"dir":"file";
-    output += "\",\"name\":\"";
-    output += String(entry.name()).substring(1);
-    output += "\"}";
-    entry.close();
-  }
-
-  output += "]";
-  server.send(200, "text/json", output);
 }
 #endif
 
 void setup() {
   // put your setup code here, to run once:
   DBG_OUTPUT_PORT.begin(115200);
+  SPIFFS.begin();
 #ifdef LCD
   lcd.begin();
   lcd.backlight();
@@ -475,16 +421,6 @@ void setup() {
   pinMode(BUTTONSWITCH_GPIO, INPUT_PULLUP);
 
 #ifdef HTTP_SERVER
-  SPIFFS.begin();
-  {
-    Dir dir = SPIFFS.openDir("/");
-    while (dir.next()) {    
-      String fileName = dir.fileName();
-      size_t fileSize = dir.fileSize();
-      DBG_OUTPUT_PORT.printf("FS File: %s, size: %s\n\r", fileName.c_str(), formatBytes(fileSize).c_str());
-    }
-    DBG_OUTPUT_PORT.printf("\n");
-  }
 #endif
 
   // Setup Wifi
@@ -514,26 +450,17 @@ void setup() {
     }
   }
   IPAddress myip = WiFi.localIP();
-  myIPAddress = String(myip[0]) + "." +String(myip[1]) + "." + String(myip[2]) + "." + String(myip[3]);
-  /*
-     if ( i!=0 ) {
-     lcd.setCursor(0,0);  
-     lcd.print("IP Address      ");
-     lcd.setCursor(0,1);
-     lcd.print(myIPAddress + " ");
-     DBG_OUTPUT_PORT.print("Connected to ");
-     DBG_OUTPUT_PORT.println(WiFi.localIP());
-     }
-   */
 
+#ifdef SYSLOG
+  myIPAddress = String(myip[0]) + "." +String(myip[1]) + "." + String(myip[2]) + "." + String(myip[3]);
+#endif
   //Get NTP time
-  configTime( 0, 0, "pool.ntp.org", "time.nist.gov"); 
+  configTime( -7*3600, 0, "pool.ntp.org", "time.nist.gov"); 
   while (!(time(&now_t))) {
     Serial.print(".");
     delay(1000);
   }
   char buffer[80] = "ESP Reset time ";
-  //temp_timestamp[0] = tz.toLocal(temp_timestamp[0]);
   strcat(buffer, ctime(&now_t));
   Serial.println(buffer);
 #ifdef SYSLOG
@@ -541,63 +468,75 @@ void setup() {
   udp.write(buffer, strlen(buffer));
   udp.endPacket();
 #endif
-#ifdef HTTP_SERVER
-  MDNS.begin(host);
-  DBG_OUTPUT_PORT.print("Open http://");
-  DBG_OUTPUT_PORT.print(host);
-  DBG_OUTPUT_PORT.println(".local/edit to see the file browser");
+  if (!MDNS.begin(host)) {
+    Serial.println("Error setting up MDNS responder!");
+    while(1) { 
+      delay(1000);
+    }
+  }
+  LLMNR.begin(host);
+  MDNS.addService("http","tcp",80);
 
+#ifdef HTTP_SERVER
+  ws.onEvent(onWsEvent);
+  WebServer.addHandler(&ws);
+  WebServer.addHandler(new SPIFFSEditor(www_username,www_password));
+  WebServer.serveStatic("/",SPIFFS, "/")
+    .setDefaultFile("index.htm")
+    .setAuthentication(www_username,www_password);
+  WebServer.on("/heap", HTTP_GET, [](AsyncWebServerRequest *request){
+      request->send(200, "text/plain", String(ESP.getFreeHeap()));
+  });
+  //called when the url is not defined here
+  //use it to load content from SPIFFS
+  WebServer.onNotFound([](AsyncWebServerRequest *request){
+      request->send(404);
+  });
+  WebServer.on("/pool", HTTP_GET, handlePool);
+  WebServer.on("/weather", HTTP_GET, handleWeather);
+  WebServer.on("/switch", HTTP_GET, handleSwitch);
+  WebServer.begin();
+  DBG_OUTPUT_PORT.println("HTTP server started");
 #ifdef OTA
   ArduinoOTA.onStart([]() {
       Serial.println("OTA Start");
       pauseSensor();
+      ws.textAll("{\"type\":\"firmware_update\",\"progress\":0.0}");
       });
   ArduinoOTA.onEnd([]() {
       Serial.println("\nEnd");
+      ws.closeAll(1001, "{\"type\":\"firmware_update\",\"progress\": 100.0}");
       });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
       Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+      ws.textAll("{\"type\":\"firmware_update\",\"progress\":" + String(progress / (total/100)));
       });
   ArduinoOTA.onError([](ota_error_t error) {
       Serial.printf("Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
-      });
+      if (error == OTA_AUTH_ERROR) {
+	Serial.println("Auth Failed");
+	ws.textAll("{\"type\":\"firmware_update\",\"msg\": \"Auth Failed\"}");
+      }
+      else if (error == OTA_BEGIN_ERROR) {
+	Serial.println("Begin Failed");
+	ws.textAll("{\"type\":\"firmware_update\",\"msg\": \"Begin Failed\"}");
+      }
+      else if (error == OTA_CONNECT_ERROR) {
+	Serial.println("Connect Failed");
+	ws.textAll("{\"type\":\"firmware_update\",\"msg\": \"Connect Failed\"}");
+      }
+      else if (error == OTA_RECEIVE_ERROR) {
+	Serial.println("Receive Failed");
+	ws.textAll("{\"type\":\"firmware_update\",\"msg\": \"Received Failed\"}");
+      }
+      else if (error == OTA_END_ERROR) {
+	Serial.println("End Failed");
+	ws.textAll("{\"type\":\"firmware_update\",\"msg\": \"End Failed\"}");
+      }
+  });
   ArduinoOTA.begin();
 #endif
 
-  //SERVER INIT
-  //list directory
-  server.on("/list", HTTP_GET, handleFileList);
-  //load editor
-  server.on("/edit", HTTP_GET, [](){
-      
-      if(!handleFileRead("/edit.htm")) server.send(404, "text/plain", "FileNotFound");
-      });
-  //create file
-  server.on("/edit", HTTP_PUT, handleFileCreate);
-  //delete file
-  server.on("/edit", HTTP_DELETE, handleFileDelete);
-  //first callback is called after the request has ended with all parsed arguments
-  //second callback handles file uploads at that location
-  server.on("/edit", HTTP_POST, [](){ server.send(200, "text/plain", ""); }, handleFileUpload);
-
-  //called when the url is not defined here`
-  //use it to load content from SPIFFS
-  server.onNotFound([](){
-      if(!handleFileRead(server.uri()))
-      server.send(404, "text/plain", "FileNotFound");
-      });
-
-  server.on("/pool", HTTP_GET, handlePool);
-  server.on("/weather", HTTP_GET, handleWeather);
-  server.on("/switch", HTTP_GET, handleSwitch);
-
-  server.begin();
-  DBG_OUTPUT_PORT.println("HTTP server started");
 
 #endif
 
@@ -891,9 +830,6 @@ void serialEvent1() {
 
 void loop() {
   // put your main code here, to run repeatedly:
-#ifdef HTTP_SERVER
-  server.handleClient();
-#endif
   checkRCTransmitter();
 #ifdef LCD  
   checkButtonTransmitter();
@@ -1092,7 +1028,6 @@ void pauseSensor() {
 }
 void updateThingSpeak(String tsData, String writeAPIKey)
 {
-  //pauseSensor();
   if (client.connect(thingSpeakAddress,80))
   {         
     //Serial.println("Connected to ThingSpeak...");
@@ -1113,7 +1048,6 @@ void updateThingSpeak(String tsData, String writeAPIKey)
       
     }
   }
-  //resumeSensor();
 }
 
 #endif
