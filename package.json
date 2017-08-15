@@ -1,0 +1,26 @@
+{
+  "name": "homeauto",
+  "version": "1.0.0",
+  "description": "This is a project to use ESP8266 to automate stuff around my house. This includes:   - Detect thermometer/hygrometer data from an outdoor Accurite sensor.   - Detect pool thermometer from a pool floating sensor   - Send On/Off signal wirelessly to few 315Mhz remote switch around the house.",
+  "main": "index.js",
+  "dependencies": {
+    "gulp-webserver": "^0.9.1"
+  },
+  "devDependencies": {
+    "gulp": "^3.9.1",
+    "gulp-webserver": "^0.9.1"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cweemin/8266HomeAuto.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/cweemin/8266HomeAuto/issues"
+  },
+  "homepage": "https://github.com/cweemin/8266HomeAuto#readme"
+}

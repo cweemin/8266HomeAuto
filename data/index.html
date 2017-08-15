@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en" ng-app="SwitchApp" ng-cloak>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Switch</title>
+
+  <!-- Angular Material style sheet -->
+  <link rel="stylesheet" 
+  href="http://ajax.googleapis.com/ajax/libs/angular_material/1.1.4/angular-material.min.css">
+<style>
+md-content { 
+  background-color: #ffe0a0;
+}
+
+.flex-row {
+  display: flex;
+  flex-direction:row;
+  justify-content: space-between;
+}
+.flex-buttons {
+   display: flex;
+   flex-direction: row;
+   justify-content:space-around;
+}
+.flex-column {
+  display: flex;
+  flex-direction:column;
+  margin:auto;
+  width:360px;
+}
+.column-item {
+display:flex;
+}
+
+#weather {
+position:absolute;
+top:100px;
+left: 50px;
+}
+</style>
+ <!-- Angular Material requires Angular.js Libraries -->
+  <script src="http://ajax.googleapis.com/ajax/libs/angularjs/1.6.4/angular.min.js"></script>
+  <script src="http://ajax.googleapis.com/ajax/libs/angularjs/1.6.4/angular-animate.min.js"></script>
+  <script src="http://ajax.googleapis.com/ajax/libs/angularjs/1.6.4/angular-aria.min.js"></script>
+  <script src="http://ajax.googleapis.com/ajax/libs/angularjs/1.6.4/angular-messages.min.js"></script>
+
+  <!-- Angular Material Library -->
+  <script src="http://ajax.googleapis.com/ajax/libs/angular_material/1.1.4/angular-material.min.js"></script>
+  <script type="text/javascript">
+  angular.module('SwitchApp', ['ngMaterial'])
+  .controller('SwitchCtrl',['$scope', '$http', function($scope,$http) {
+      var url='';
+      var webHost = 'esp';
+      /*
+      if (window.location.hostname == '') {
+        webHost = 'alarm';
+      } else {
+        webHost = window.location.hostname;
+      }*/
+
+      console.log('Connect to location ' + webHost);
+      var wsUri = 'ws://' + webHost + '/ws';
+      wsconn = new WebSocket(wsUri);
+      wsconn.onopen = function(evt) {
+        wsconn.send("get weather");
+      }
+      wsconn.onmessage = function(evt) {
+	try {
+	  var alarmdata = JSON.parse(evt.data);
+	  if (alarmdata.hasOwnProperty('weather')) {
+	    $scope.root.tempCelcius = alarmdata.weather[0];
+	    $scope.root.tempFahrenheit = alarmdata.weather[1];
+	    $scope.root.humidity = alarmdata.weather[2];
+	  } 
+	  if (alarmdata.hasOwnProperty('type') && alarmdata.type == 'firmware_update') {
+	    $scope.progress = parseFloat(alarmdata.progress)
+	  }
+	}
+	catch(e) {
+	  console.error("Error connecting to websocket:" + e)
+	}
+      }
+      $scope.root = {tempFahrenheit:null, humidity:null};
+      $scope.progress = null
+      $scope.weather= 'Hello';
+      $scope.array1 = [
+      {'Name': 'Kitchen Light', 'Type': 'Toggle' }, 
+      { 'Name': 'Living Room Lamp', 'Type': 'Switch' }, 
+      { 'Name': 'Kitchen Counter', 'Type': 'Switch' }, 
+      { 'Name': 'Fan Low', 'Type': 'Toggle' }, 
+      { 'Name': 'Fan Med', 'Type': 'Toggle' }, 
+      { 'Name': 'Fan Hi', 'Type': 'Toggle' }, 
+      { 'Name': 'Fan', 'Type': 'Toggle' }, 
+      { 'Name': 'Fan Light', 'Type': 'Toggle'}];
+      $scope.Switch = function(jtype, bStatus) {
+      $http.get(url+'/switch', {params: {type:  1 << jtype, status: bStatus << jtype}});
+      }
+      }]);
+  </script>
+
+
+  <!-- For chart -->
+  <script type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/1.9.1/jquery.min.js"></script>
+  <script src="http://code.highcharts.com/stock/highstock.js"></script>
+  <script src="http://code.highcharts.com/stock/modules/exporting.js"></script>
+  <script src="https://rawgithub.com/highslide-software/export-csv/master/export-csv.js"></script>
+  <script src="chart.js"></script>
+
+</head>
+<body  ng-controller="SwitchCtrl" ng-cloak>
+ <md-content>
+   <md-progress-linear ng-if="progress != null" md-mode="determinate" ng-value="progress"></md-progress-linear>
+   <md-tabs md-dynamic-height md-border-bottom>
+     <md-tab label="Switch">
+	 <div id="weather" ng-if="root.humidity != null">
+	   <h2>{{root.tempFahrenheit}}F {{root.humidity}}%<h2>
+	 </div>
+       <md-content class="flex-column">
+	 <div class="flex-row" ng-repeat="item in array1">
+	  <h1>{{item.Name}}</h1>
+	  <div class="flex-buttons">
+	    <md-button ng-click="Switch($index, 1)" aria-label="{{item.Name}} on" class="md-fab">
+	      <md-icon md-svg-src="ic_flash_on_black_24px.svg"></md-icon>
+	    </md-button>
+	    <md-button ng-if="item.Type == 'Switch'" ng-click="Switch($index,0)" aria-label="{{item.Name}} off" class="md-fab md-accent">
+	      <md-icon md-svg-src="ic_flash_off_black_24px.svg"></md-icon>
+	    </md-button>
+	  </div>
+	 </div>
+	 <div ng-if="outside_time != ''">
+	  {{outside_time}}
+	 </div>
+	 <!--div layout="row" layout-align="center center">
+	 <h1>Get Pool Temp</h1><md-button ng-click="getTemp('pool')" class="md-fab"><md-icon md-svg-src="ic_cloud_black_24px.svg"></md-icon></md-button>
+	 <label>Unit (C/F)</label>
+	 <md-select ng-model="temp_unit" ng-change=changeUnit() aria-label="Unit">
+	 <md-option value="F">F</md-option>
+	 <md-option value="C">C</md-option>
+	 </md-select>
+	 </div-->
+       </md-content>
+     </md-tab>
+     <md-tab label="Weather">
+	<div id="chart-container" style="height: 600px;">
+	  Highstock Chart Here<br>
+	</div>
+	<div id="below chart"> <button style="width: 89px; margin-top: -18px;" value="Hide All"
+	    name="Hide All Button"
+	    onclick="HideAll();">Hide
+	    All</button><button style="width: 200px; margin-top: -18px;" value="Load More Data"
+	    name="Load More Data"
+	    onclick="loadOneChannel();">Load
+	    More Historical Data </button>
+	  <select id="Channel Select">
+	  </select>
+	  <select id="Loads">
+	    <option value="1" selected="selected">1 Load</option>
+	    <option value="2">2 Loads</option>
+	    <option value="3">3 Loads</option>
+	    <option value="4">4 Loads</option>
+	    <option value="5">5 Loads</option>
+	    <option value="6">6 Loads</option>
+	    <option value="7">7 Loads</option>
+	    <option value="8">8 Loads</option>
+	    <option value="9">9 Loads</option>
+	    <option value="10">10 Loads</option>
+	    <option value="15">15 Loads</option>
+	    <option value="20">20 Loads</option>
+	    <option value="25">25 Loads</option>
+	    <option value="30">30 Loads</option>
+	    <option value="40">40 Loads</option>
+	    <option value="50">50 Loads</option>
+	  </select>
+	  <button id="getWeather">Get Weather</button>
+	  <input id="Update" name="Update" type="checkbox"><span style="font-family: Lucida Grande;">Update
+	    Chart</span> <span id="Latency" style="font-family: Lucida Grande;">(Latency)</span>
+	  <div id="showWeather2" style="visibility: visible;"><div><span class="label">Temperature</span> <span class="answer">69.44F</span></div><div><span class="label">Humidity</span> <span class="answer">100%</span></div><div><span class="label">Cloudiness</span> <span class="answer">80%</span></div>
+	</div>
+     </md-tab>
+   </md-tabs>
+</md-content> 
+</body>
+</html>

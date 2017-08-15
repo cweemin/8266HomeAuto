@@ -1,0 +1,18 @@
+{
+  "name": "HomeAuto",
+  "homepage": "https://github.com/cweemin/8266HomeAuto",
+  "authors": [
+    "Wee-Min Chan <cweemin@gmail.com>"
+  ],
+  "description": "",
+  "main": "index.htm",
+  "license": "MIT",
+  "private": true,
+  "ignore": [
+    "**/.*",
+    "node_modules",
+    "bower_components",
+    "test",
+    "tests"
+  ]
+}
