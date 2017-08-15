@@ -92,18 +92,18 @@ LiquidCrystal_I2C lcd(0x27, 16, 2); // set the LCD address to 0x27 for a 16 char
 /*** Define Switch ***/
 RCSwitch *mySwitch = new RCSwitch();
 switch_prop *GEFanProp = new switch_prop(mySwitch, 6, 400, 25);
-pSwitch LivingRoomFanLow = pSwitch(GEFanProp, 10463095, 10463101);
-pSwitch LivingRoomFanMed = pSwitch(GEFanProp, 10463087, 10463101);
-pSwitch LivingRoomFanHi  = pSwitch(GEFanProp, 10463071, 10463101);
-pSwitch LivingRoomLight  = pSwitch(GEFanProp, 10463102, 10463102);
+pSwitch LivingRoomFanLow = pSwitch(GEFanProp, 10463095, 10463101,"Fan Low");
+pSwitch LivingRoomFanMed = pSwitch(GEFanProp, 10463087, 10463101,"Fan Med");
+pSwitch LivingRoomFanHi  = pSwitch(GEFanProp, 10463071, 10463101,"Fan Hi");
+pSwitch LivingRoomLight  = pSwitch(GEFanProp, 10463102, 10463102,"Fan Light");
 
 
 switch_prop *WallSwitch = new switch_prop(mySwitch, 1, 350, 24);
-pSwitch KitchenLight = pSwitch(WallSwitch, 0x73935C, 0x73935C);
+pSwitch KitchenLight = pSwitch(WallSwitch, 0x73935C, 0x73935C,"Kitchen Light");
 
 switch_prop *PlugSwitch = new switch_prop(mySwitch, 1, 600, 16);
-pSwitch LivingRoomLamp = pSwitch(PlugSwitch, 0x6908, 0x6A08);
-pSwitch KitchenCounter = pSwitch(PlugSwitch, 0x6888, 0x6848);
+pSwitch LivingRoomLamp = pSwitch(PlugSwitch, 0x6908, 0x6A08,"LivingRoom Lamp");
+pSwitch KitchenCounter = pSwitch(PlugSwitch, 0x6888, 0x6848,"Kitchen Counter");
 /******************************************************************************/
 Ticker LCDBacklight;
 
@@ -138,7 +138,8 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
     Serial.printf("ws[%s][%u] pong[%u]: %s\n", server->url(), client->id(), len, (len)?(char*)data:"");
   } else if(type == WS_EVT_DATA){
     AwsFrameInfo * info = (AwsFrameInfo*)arg;
-    String msg = "{\"type\":\"command\",\"command\":\"";
+    String msg1 = "{\"type\":\"command\",\"command\":\"";
+    String msg = "";
     if(info->final && info->index == 0 && info->len == len){
       //the whole message is in a single frame and we got all of it's data
       Serial.printf("ws[%s][%u] %s-message[%llu]: ", server->url(), client->id(), (info->opcode == WS_TEXT)?"text":"binary", info->len);
@@ -147,9 +148,18 @@ void onWsEvent(AsyncWebSocket * server, AsyncWebSocketClient * client, AwsEventT
         for(size_t i=0; i < info->len; i++) {
           msg += (char) data[i];
         }
-	msg += "\"}";
-
-	ws.text(client->id(), msg);
+	if (msg == "get weather") {
+	  if(Data.tempAvail) {
+	    float field1 = rawTemp[0] / 10.0;
+	    float field2 = rawTemp[0] * 9.0 / 50.0 + 32.0;
+	    ws.textAll("{\"weather\":["+String(field1)+","+String(field2)+","+String(humidity)+"]}");
+	  } else {
+	    ws.textAll("{\"message\":\"no data\"}");
+	  }
+	} else {
+	    ws.textAll("{\"message\":\""+msg+"\"}");
+	}
+	ws.text(client->id(), msg1 + msg + "\"}");
 
       } else {
         char buff[3];
@@ -373,6 +383,7 @@ void handleSwitch(AsyncWebServerRequest *request) {
   if(request->hasArg("type") && request->hasArg("status")) {
     t_type = (uint16_t) request->arg("type").toInt();
     t_status = (uint16_t) request->arg("status").toInt();
+
     for(i=0; i< 8; i++) {
       status = (bool) ((t_status & start_bit) >> i);
       switch (t_type & start_bit) {
@@ -380,10 +391,10 @@ void handleSwitch(AsyncWebServerRequest *request) {
           KitchenLight.On();
           break;
         case 0b10: //2
-          LivingRoomLamp.Toggle(status);
+          KitchenCounter.Toggle(status);
           break;
         case 0b100: //4
-          KitchenCounter.Toggle(status);
+          LivingRoomLamp.Toggle(status);
           break;
         case 0b1000: //8
           LivingRoomFanLow.Toggle(status);
@@ -420,9 +431,6 @@ void setup() {
 #endif
   pinMode(BUTTONSWITCH_GPIO, INPUT_PULLUP);
 
-#ifdef HTTP_SERVER
-#endif
-
   // Setup Wifi
   WiFi.hostname(host);
   WiFi.mode(WIFI_STA);
@@ -450,6 +458,10 @@ void setup() {
     }
   }
   IPAddress myip = WiFi.localIP();
+
+#ifdef HTTP_SERVER
+//  GEFanProp->setWs(&ws);
+#endif
 
 #ifdef SYSLOG
   myIPAddress = String(myip[0]) + "." +String(myip[1]) + "." + String(myip[2]) + "." + String(myip[3]);
@@ -482,7 +494,7 @@ void setup() {
   WebServer.addHandler(&ws);
   WebServer.addHandler(new SPIFFSEditor(www_username,www_password));
   WebServer.serveStatic("/",SPIFFS, "/")
-    .setDefaultFile("index.htm")
+    .setDefaultFile("index.html")
     .setAuthentication(www_username,www_password);
   WebServer.on("/heap", HTTP_GET, [](AsyncWebServerRequest *request){
       request->send(200, "text/plain", String(ESP.getFreeHeap()));
@@ -496,12 +508,13 @@ void setup() {
   WebServer.on("/weather", HTTP_GET, handleWeather);
   WebServer.on("/switch", HTTP_GET, handleSwitch);
   WebServer.begin();
+
   DBG_OUTPUT_PORT.println("HTTP server started");
 #ifdef OTA
   ArduinoOTA.onStart([]() {
       Serial.println("OTA Start");
       pauseSensor();
-      ws.textAll("{\"type\":\"firmware_update\",\"progress\":0.0}");
+      ws.textAll("{\"type\":\"firmware_update\",\"progress\": 0.0}");
       });
   ArduinoOTA.onEnd([]() {
       Serial.println("\nEnd");
@@ -509,7 +522,7 @@ void setup() {
       });
   ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
       Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-      ws.textAll("{\"type\":\"firmware_update\",\"progress\":" + String(progress / (total/100)));
+      ws.textAll("{\"type\":\"firmware_update\",\"progress\": " + String(progress / (total/100))+"}");
       });
   ArduinoOTA.onError([](ota_error_t error) {
       Serial.printf("Error[%u]: ", error);
@@ -1006,14 +1019,18 @@ void ThingSpeakLoop() {
   }
   if (Data.poolTS) {
     Serial.print("Sending Pool data to TS");
-    updateThingSpeak("field1="+ String((float)rawTemp[1]/10.0) + "&field2=" + String( (float)rawTemp[1] * 9.0/50.0 +32.0), PoolWriteAPIKey);
+    float field1 = rawTemp[1] / 10.0;
+    float field2 = rawTemp[1] * 9.0/50.0 + 32.0;
+    ws.textAll("{\"pool\":["+String(field1)+","+String(field2) + "]}");
+    updateThingSpeak("field1="+ String(field1) + "&field2=" + String(field2), PoolWriteAPIKey);
     Data.poolTS = false;
-
-
   }
   if (Data.weatherTS) {
     Serial.print("Sending Weather data to TS");
-    updateThingSpeak("field1="+ String((float)rawTemp[0]/10.0) + "&field2=" +String( (float)rawTemp[0] * 9.0/50.0 +32.0) + "&field3="+String(humidity), WeatherWriteAPIKey); 
+    float field1 = rawTemp[0]/10.0;
+    float field2 = rawTemp[0] * 9.0 / 50.0 + 32.0;
+    ws.textAll("{\"weather\":["+String(field1)+","+String(field2)+","+String(humidity)+"]}");
+    updateThingSpeak("field1="+ String(field1) + "&field2=" +String(field2) + "&field3="+String(humidity), WeatherWriteAPIKey); 
     Data.weatherTS = false;
   }
   Data.TSlastConnected = client.connected();
